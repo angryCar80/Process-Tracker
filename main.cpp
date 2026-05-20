@@ -1,17 +1,31 @@
+// Defining Colors
+#include <cstdio>
+#define Black "\e[0;30m"
+#define Red "\e[0;31m"
+#define Green "\e[0;32m"
+#define Yellow "\e[0;33m"
+#define Blue "\e[0;34m"
+#define Purple "\e[0;35m"
+#define Cyan "\e[0;36m"
+#define White "\e[0;37m"
+#define Reset "\033[0m"
+#define Rev "\e[7m"
+// Includes Nedded
 #include <asm-generic/ioctls.h>
 #include <cctype>
 #include <cstring>
 #include <dirent.h>
-#include <fstream>
 #include <iostream>
-// #include <sstream>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string>
 #include <sys/ioctl.h>
 #include <termios.h>
 #include <unistd.h>
 #include <vector>
 
+// Terminal Managment function
 struct termios orig_termios;
 
 void disableRawMode() { tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios); }
@@ -24,13 +38,15 @@ void enableRawMode() {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-class Proccess {
+// Getting Process and putting them in this class //
+class Process {
 public:
   int pid;
   std::string name;
-  Proccess(int pid, const std::string &name) : pid(pid), name(name) {}
+  Process(int pid, const std::string &name) : pid(pid), name(name) {}
 };
 
+// To Get Process Name
 std::string getProcessName(int pid) {
   char path[64];
   snprintf(path, sizeof(path), "/proc/%d/comm", pid);
@@ -49,33 +65,195 @@ std::string getProcessName(int pid) {
   return "unknown";
 }
 
-int main() {
-  std::vector<Proccess> processes;
-  // init the vector
-  // 1. For loop of the system processes
+std::string toLower(const std::string &s) {
+  std::string r;
+  for (char c : s)
+    r += std::tolower(c);
+  return r;
+}
 
+bool matches(const std::string &str, const std::string &q) {
+  if (q.empty())
+    return true;
+  return toLower(str).find(toLower(q)) != std::string::npos;
+}
+
+std::vector<Process> filter(const std::vector<Process> &all,
+                            const std::string &q) {
+  std::vector<Process> res;
+  for (const auto &p : all) {
+    if (matches(p.name, q) || matches(std::to_string(p.pid), q)) {
+      res.push_back(p);
+    }
+  }
+  return res;
+}
+
+void clearScreen() { std::cout << "\033[2J\033[H"; }
+
+void printHeader(int pad) {
+  std::cout << Cyan << std::string(pad, ' ')
+            << "╔══════════════════════════════════════════════╗\n";
+  std::cout << std::string(pad, ' ')
+            << "║             Process Killer v1.0              ║\n";
+  std::cout << std::string(pad, ' ')
+            << "╚══════════════════════════════════════════════╝\n"
+            << Reset;
+  std::cout << "\n";
+}
+
+void printList(const std::vector<Process> &procs, int sel, int offset,
+               int rows, int nw, int pad) {
+  int end = offset + rows;
+  if (end > (int)procs.size())
+    end = procs.size();
+
+  for (int i = offset; i < end; i++) {
+    if (i == sel) {
+      std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset
+                << Rev << procs[i].name
+                << std::string(nw - procs[i].name.length(), ' ') << Green
+                << procs[i].pid << Reset "\n";
+    } else {
+      std::cout << std::string(pad, ' ') << "  " << procs[i].name
+                << std::string(nw - procs[i].name.length(), ' ') << Green
+                << procs[i].pid << Reset "\n";
+    }
+  }
+
+  if (procs.size() > rows) {
+    int showing = end - offset;
+    std::cout << std::string(pad, ' ') << Purple << "─── " << offset + 1 << "-"
+              << offset + showing << " of " << procs.size() << " ───\n"
+              << Reset;
+  }
+}
+
+int main() {
   struct winsize w;
   ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
 
+  std::vector<Process> all;
   DIR *dir = opendir("/proc/");
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
     if (isdigit(entry->d_name[0])) {
       int pid = atoi(entry->d_name);
-      std::string pname = getProcessName(pid);
-      processes.emplace_back(pid, pname);
+      all.emplace_back(pid, getProcessName(pid));
     }
   }
   closedir(dir);
-  std::string input;
 
-  int lineLength = 33;
-  int padding = (w.ws_col - lineLength) / 2;
+  int maxLen = 0;
+  for (const auto &p : all)
+    if (p.name.length() > maxLen)
+      maxLen = p.name.length();
+  int nw = maxLen + 2;
+  int pad = (w.ws_col - (nw + 14)) / 2;
+  if (pad < 0)
+    pad = 0;
 
-  std::cout << std::string(padding, ' ')
-            << "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n";
-  std::cout << std::string(padding, ' ') << "> ";
-  std::cin >> input;
+  enableRawMode();
 
+  std::string q;
+  int sel = 0;
+  int offset = 0;
+  int rows = 30;
+  bool listMode = false;
+
+  while (true) {
+    clearScreen();
+    printHeader(pad);
+
+    auto res = filter(all, q);
+    if (!res.empty()) {
+      if (sel >= (int)res.size())
+        sel = res.size() - 1;
+      if (sel < 0)
+        sel = 0;
+    }
+
+    int maxOffset = (int)res.size() - rows;
+    if (maxOffset < 0) maxOffset = 0;
+    if (offset > maxOffset) offset = maxOffset;
+    if (offset < 0) offset = 0;
+    if (sel < offset) offset = sel;
+    if (sel >= offset + rows && rows > 0) offset = sel - rows + 1;
+
+    if (listMode) {
+      std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
+                << Yellow << q << Reset "\n\n";
+    } else {
+      std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
+                << Reset << q << Cyan << "█" << Reset "\n\n";
+    }
+
+    std::cout << std::string(pad, ' ') << White << "Processes (" << Green
+              << res.size() << White << ")" << Reset "\n";
+    printList(res, listMode ? sel : -1, offset, rows, nw, pad);
+
+    if (listMode) {
+      std::cout << "\n"
+                << std::string(pad, ' ') << Yellow
+                << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  q quit"
+                << Reset "\n";
+    } else {
+      std::cout << "\n"
+                << std::string(pad, ' ') << Yellow
+                << "Type to filter  |  Tab browse  |  q quit" << Reset "\n";
+    }
+    std::cout << std::flush;
+
+    char c;
+    read(STDIN_FILENO, &c, 1);
+
+    if (c == '\t') {
+      listMode = !listMode;
+      if (!listMode)
+        sel = 0;
+    } else if (c == 'q') {
+      break;
+    } else if (c == '\x1b') {
+      char seq[2];
+      if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+          read(STDIN_FILENO, &seq[1], 1) == 1) {
+        if (seq[0] == '[') {
+          if (seq[1] == 'A' && listMode && !res.empty())
+            sel--;
+          else if (seq[1] == 'B' && listMode && !res.empty())
+            sel++;
+        }
+      }
+    } else if (c == 'j' && listMode && !res.empty()) {
+      sel++;
+    } else if (c == 'k' && listMode && !res.empty()) {
+      sel--;
+    } else if ((c == '\n' || c == '\r') && listMode && !res.empty()) {
+      clearScreen();
+      std::cout << Red << "\nKill " << res[sel].name << " (" << res[sel].pid
+                << ")? (y/N) " << Reset << std::flush;
+      char yn;
+      read(STDIN_FILENO, &yn, 1);
+      if (yn == 'y' || yn == 'Y') {
+        if (kill(res[sel].pid, SIGTERM) == 0) {
+          std::cout << Green << "Sent SIGTERM \u2713\n" << Reset;
+        } else {
+          std::cout << Red << "Failed \u2717\n" << Reset;
+        }
+      } else {
+        std::cout << Yellow << "Cancelled\n" << Reset;
+      }
+      std::cout << "Press any key..." << std::flush;
+      read(STDIN_FILENO, &c, 1);
+    } else if ((c == '\x7f' || c == '\x08') && !listMode && !q.empty()) {
+      q.pop_back();
+    } else if (!listMode && c >= 32 && c <= 126) {
+      q += c;
+    }
+  }
+
+  disableRawMode();
+  clearScreen();
+  std::cout << Green << "Bye!" << Reset "\n";
   return 0;
 }
