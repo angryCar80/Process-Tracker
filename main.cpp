@@ -102,16 +102,16 @@ void printHeader(int pad) {
   std::cout << "\n";
 }
 
-void printList(const std::vector<Process> &procs, int sel, int offset,
-               int rows, int nw, int pad) {
+void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
+               int nw, int pad) {
   int end = offset + rows;
   if (end > (int)procs.size())
     end = procs.size();
 
   for (int i = offset; i < end; i++) {
     if (i == sel) {
-      std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset
-                << Rev << procs[i].name
+      std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset << Rev
+                << procs[i].name
                 << std::string(nw - procs[i].name.length(), ' ') << Green
                 << procs[i].pid << Reset "\n";
     } else {
@@ -174,11 +174,16 @@ int main() {
     }
 
     int maxOffset = (int)res.size() - rows;
-    if (maxOffset < 0) maxOffset = 0;
-    if (offset > maxOffset) offset = maxOffset;
-    if (offset < 0) offset = 0;
-    if (sel < offset) offset = sel;
-    if (sel >= offset + rows && rows > 0) offset = sel - rows + 1;
+    if (maxOffset < 0)
+      maxOffset = 0;
+    if (offset > maxOffset)
+      offset = maxOffset;
+    if (offset < 0)
+      offset = 0;
+    if (sel < offset)
+      offset = sel;
+    if (sel >= offset + rows && rows > 0)
+      offset = sel - rows + 1;
 
     if (listMode) {
       std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
