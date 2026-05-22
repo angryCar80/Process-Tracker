@@ -1,5 +1,6 @@
 // Defining Colors
 #include <cstdio>
+#include <sched.h>
 #define Black "\e[0;30m"
 #define Red "\e[0;31m"
 #define Green "\e[0;32m"
@@ -15,6 +16,7 @@
 #include <cctype>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <iostream>
 #include <signal.h>
 #include <stdbool.h>
@@ -39,6 +41,13 @@ void enableRawMode() {
                         // and denying a key combo = ICANON
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
+
+// Desktop App class for --drun mode
+class DesktopApp {
+public:
+  std::string name;
+  std::string exec;
+};
 
 // Getting Process and putting them in this class //
 class Process {
@@ -93,11 +102,133 @@ std::vector<Process> filter(const std::vector<Process> &all,
 
 void clearScreen() { std::cout << "\033[2J\033[H"; }
 
-void printHeader(int pad) {
+std::string stripFieldCodes(const std::string &exec) {
+  std::string r;
+  for (size_t i = 0; i < exec.length(); i++) {
+    if (exec[i] == '%' && i + 1 < exec.length() && std::isalpha(exec[i + 1])) {
+      i++;
+      continue;
+    }
+    r += exec[i];
+  }
+  while (!r.empty() && r.back() == ' ')
+    r.pop_back();
+  return r;
+}
+
+DesktopApp parseDesktopFile(const std::string &path) {
+  FILE *fp = fopen(path.c_str(), "r");
+  if (!fp)
+    return {"", ""};
+
+  char line[512];
+  std::string name, exec;
+  bool inEntry = false;
+  bool noDisplay = false;
+  bool hidden = false;
+
+  while (fgets(line, sizeof(line), fp)) {
+    if (line[0] == '#')
+      continue;
+    line[strcspn(line, "\n")] = 0;
+    line[strcspn(line, "\r")] = 0;
+
+    if (strcmp(line, "[Desktop Entry]") == 0) {
+      inEntry = true;
+      continue;
+    }
+    if (line[0] == '[' && line[strlen(line) - 1] == ']') {
+      inEntry = false;
+      continue;
+    }
+    if (!inEntry)
+      continue;
+
+    if (strncmp(line, "NoDisplay=", 10) == 0 && strcmp(line + 10, "true") == 0)
+      noDisplay = true;
+    if (strncmp(line, "Hidden=", 7) == 0 && strcmp(line + 7, "true") == 0)
+      hidden = true;
+    if (strncmp(line, "Type=", 5) == 0 && strcmp(line + 5, "Application") != 0)
+      noDisplay = true;
+    if (strncmp(line, "Name=", 5) == 0)
+      name = line + 5;
+    if (strncmp(line, "Exec=", 5) == 0)
+      exec = stripFieldCodes(line + 5);
+  }
+  fclose(fp);
+
+  if (name.empty() || exec.empty() || noDisplay || hidden)
+    return {"", ""};
+  return {name, exec};
+}
+
+std::vector<DesktopApp> scanDesktopDirs() {
+  std::vector<DesktopApp> apps;
+  const char *home = getenv("HOME");
+  std::string userDir;
+  if (home)
+    userDir = std::string(home) + "/.local/share/applications/";
+
+  const char *dirs[] = {"/usr/share/applications/",
+                        "/usr/local/share/applications/",
+                        userDir.empty() ? nullptr : userDir.c_str()};
+
+  for (const char *d : dirs) {
+    if (!d)
+      continue;
+    DIR *dir = opendir(d);
+    if (!dir)
+      continue;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (entry->d_type != DT_REG && entry->d_type != DT_LNK)
+        continue;
+      size_t len = strlen(entry->d_name);
+      if (len < 8 || strcmp(entry->d_name + len - 8, ".desktop") != 0)
+        continue;
+      std::string full = std::string(d) + entry->d_name;
+      DesktopApp app = parseDesktopFile(full);
+      if (!app.name.empty())
+        apps.push_back(app);
+    }
+    closedir(dir);
+  }
+
+  return apps;
+}
+
+void launchApp(const std::string &exec) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    setsid();
+    int fd = open("/dev/null", O_RDWR);
+    if (fd != -1) {
+      dup2(fd, STDIN_FILENO);
+      dup2(fd, STDOUT_FILENO);
+      dup2(fd, STDERR_FILENO);
+      if (fd > 2)
+        close(fd);
+    }
+    execl("/bin/sh", "sh", "-c", exec.c_str(), NULL);
+    exit(1);
+  }
+}
+
+void printHeaderProcess(int pad) {
   std::cout << Cyan << std::string(pad, ' ')
             << "╔══════════════════════════════════════════════╗\n";
   std::cout << std::string(pad, ' ')
             << "║             Process Killer v1.0              ║\n";
+  std::cout << std::string(pad, ' ')
+            << "╚══════════════════════════════════════════════╝\n"
+            << Reset;
+  std::cout << "\n";
+}
+void printHeaderApp(int pad) {
+  std::cout << Cyan << std::string(pad, ' ')
+            << "╔══════════════════════════════════════════════╗\n";
+  std::cout << std::string(pad, ' ')
+            << "║               App Runner v1.0                ║\n";
   std::cout << std::string(pad, ' ')
             << "╚══════════════════════════════════════════════╝\n"
             << Reset;
@@ -132,11 +263,12 @@ void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
 }
 
 int main(int argc, char **argv) {
-  if (argc < 2) {
-    struct winsize w;
-    ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
+  std::vector<Process> all;
+  struct winsize w;
+  ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
 
-    std::vector<Process> all;
+  if (argc < 2) {
+
     DIR *dir = opendir("/proc/");
     struct dirent *entry;
     while ((entry = readdir(dir)) != nullptr) {
@@ -161,12 +293,14 @@ int main(int argc, char **argv) {
     std::string q;
     int sel = 0;
     int offset = 0;
-    int rows = 30;
+    int rows = w.ws_row - 9;
+    if (rows < 5)
+      rows = 5;
     bool listMode = false;
 
     while (true) {
       clearScreen();
-      printHeader(pad);
+      printHeaderProcess(pad);
 
       auto res = filter(all, q);
       if (!res.empty()) {
@@ -264,9 +398,124 @@ int main(int argc, char **argv) {
     clearScreen();
     std::cout << Green << "Bye!" << Reset "\n";
   }
-  if (strcmp("--drun", argv[1]) == 0) {
-    printf("%sRunning the app launcher%s\n", Green, Reset);
-    // Logic Goes here
+  if (argc >= 2 && strcmp("--drun", argv[1]) == 0) {
+    auto apps = scanDesktopDirs();
+
+    int maxLen = 0;
+    for (const auto &a : apps)
+      if (a.name.length() > maxLen)
+        maxLen = a.name.length();
+    int nw = maxLen + 2;
+    int pad = (w.ws_col - (nw + 14)) / 2;
+    if (pad < 0)
+      pad = 0;
+    int rows = w.ws_row - 9;
+    if (rows < 5)
+      rows = 5;
+
+    enableRawMode();
+
+    std::string q;
+    int sel = 0;
+    int offset = 0;
+
+    while (true) {
+      clearScreen();
+      printHeaderApp(pad);
+
+      std::vector<DesktopApp> res;
+      for (const auto &a : apps)
+        if (matches(a.name, q))
+          res.push_back(a);
+
+      if (!res.empty()) {
+        if (sel >= (int)res.size())
+          sel = res.size() - 1;
+        if (sel < 0)
+          sel = 0;
+      }
+
+      int maxOffset = (int)res.size() - rows;
+      if (maxOffset < 0)
+        maxOffset = 0;
+      if (offset > maxOffset)
+        offset = maxOffset;
+      if (offset < 0)
+        offset = 0;
+      if (sel < offset)
+        offset = sel;
+      if (sel >= offset + rows && rows > 0)
+        offset = sel - rows + 1;
+
+      std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
+                << Reset << q << Cyan << "█" << Reset "\n\n";
+
+      std::cout << std::string(pad, ' ') << White << "Apps (" << Green
+                << res.size() << White << ")" << Reset "\n";
+
+      int end = offset + rows;
+      if (end > (int)res.size())
+        end = res.size();
+      for (int i = offset; i < end; i++) {
+        if (i == sel) {
+          std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset
+                    << Rev << res[i].name
+                    << std::string(nw - res[i].name.length(), ' ') << Green
+                    << "launch" << Reset "\n";
+        } else {
+          std::cout << std::string(pad, ' ') << "  " << res[i].name
+                    << std::string(nw - res[i].name.length(), ' ') << Green
+                    << "launch" << Reset "\n";
+        }
+      }
+      if (res.size() > rows) {
+        int showing = end - offset;
+        std::cout << std::string(pad, ' ') << Purple << "─── " << offset + 1
+                  << "-" << offset + showing << " of " << res.size() << " ───\n"
+                  << Reset;
+      }
+
+      std::cout << "\n"
+                << std::string(pad, ' ') << Yellow
+                << "Type to filter  |  Enter launch  |  q quit" << Reset "\n";
+      std::cout << std::flush;
+
+      char c;
+      read(STDIN_FILENO, &c, 1);
+
+      if (c == 'q') {
+        break;
+      } else if (c == '\x1b') {
+        char seq[2];
+        if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+            read(STDIN_FILENO, &seq[1], 1) == 1) {
+          if (seq[0] == '[') {
+            if (seq[1] == 'A' && !res.empty())
+              sel--;
+            else if (seq[1] == 'B' && !res.empty())
+              sel++;
+          }
+        }
+      } else if (c == 'j' && !res.empty()) {
+        sel++;
+      } else if (c == 'k' && !res.empty()) {
+        sel--;
+      } else if ((c == '\n' || c == '\r') && !res.empty()) {
+        disableRawMode();
+        launchApp(res[sel].exec);
+        clearScreen();
+        return 0;
+      } else if (c == '\x7f' || c == '\x08') {
+        if (!q.empty())
+          q.pop_back();
+      } else if (c >= 32 && c <= 126) {
+        q += c;
+      }
+    }
+
+    disableRawMode();
+    clearScreen();
+    std::cout << Green << "Bye!" << Reset "\n";
     return 0;
   }
   return 0;
