@@ -34,7 +34,9 @@ void enableRawMode() {
   tcgetattr(STDIN_FILENO, &orig_termios);
   atexit(disableRawMode);
   struct termios raw = orig_termios;
-  raw.c_lflag &= ~(ECHO | ICANON);
+  raw.c_lflag &=
+      ~(ECHO | ICANON); // Terminal Flags to remove the echo of the input = ECHO
+                        // and denying a key combo = ICANON
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
@@ -129,136 +131,143 @@ void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
   }
 }
 
-int main() {
-  struct winsize w;
-  ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    struct winsize w;
+    ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
 
-  std::vector<Process> all;
-  DIR *dir = opendir("/proc/");
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != nullptr) {
-    if (isdigit(entry->d_name[0])) {
-      int pid = atoi(entry->d_name);
-      all.emplace_back(pid, getProcessName(pid));
-    }
-  }
-  closedir(dir);
-
-  int maxLen = 0;
-  for (const auto &p : all)
-    if (p.name.length() > maxLen)
-      maxLen = p.name.length();
-  int nw = maxLen + 2;
-  int pad = (w.ws_col - (nw + 14)) / 2;
-  if (pad < 0)
-    pad = 0;
-
-  enableRawMode();
-
-  std::string q;
-  int sel = 0;
-  int offset = 0;
-  int rows = 30;
-  bool listMode = false;
-
-  while (true) {
-    clearScreen();
-    printHeader(pad);
-
-    auto res = filter(all, q);
-    if (!res.empty()) {
-      if (sel >= (int)res.size())
-        sel = res.size() - 1;
-      if (sel < 0)
-        sel = 0;
-    }
-
-    int maxOffset = (int)res.size() - rows;
-    if (maxOffset < 0)
-      maxOffset = 0;
-    if (offset > maxOffset)
-      offset = maxOffset;
-    if (offset < 0)
-      offset = 0;
-    if (sel < offset)
-      offset = sel;
-    if (sel >= offset + rows && rows > 0)
-      offset = sel - rows + 1;
-
-    if (listMode) {
-      std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
-                << Yellow << q << Reset "\n\n";
-    } else {
-      std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
-                << Reset << q << Cyan << "█" << Reset "\n\n";
-    }
-
-    std::cout << std::string(pad, ' ') << White << "Processes (" << Green
-              << res.size() << White << ")" << Reset "\n";
-    printList(res, listMode ? sel : -1, offset, rows, nw, pad);
-
-    if (listMode) {
-      std::cout << "\n"
-                << std::string(pad, ' ') << Yellow
-                << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  q quit"
-                << Reset "\n";
-    } else {
-      std::cout << "\n"
-                << std::string(pad, ' ') << Yellow
-                << "Type to filter  |  Tab browse  |  q quit" << Reset "\n";
-    }
-    std::cout << std::flush;
-
-    char c;
-    read(STDIN_FILENO, &c, 1);
-
-    if (c == '\t') {
-      listMode = !listMode;
-      if (!listMode)
-        sel = 0;
-    } else if (c == 'q') {
-      break;
-    } else if (c == '\x1b') {
-      char seq[2];
-      if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
-          read(STDIN_FILENO, &seq[1], 1) == 1) {
-        if (seq[0] == '[') {
-          if (seq[1] == 'A' && listMode && !res.empty())
-            sel--;
-          else if (seq[1] == 'B' && listMode && !res.empty())
-            sel++;
-        }
+    std::vector<Process> all;
+    DIR *dir = opendir("/proc/");
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      if (isdigit(entry->d_name[0])) {
+        int pid = atoi(entry->d_name);
+        all.emplace_back(pid, getProcessName(pid));
       }
-    } else if (c == 'j' && listMode && !res.empty()) {
-      sel++;
-    } else if (c == 'k' && listMode && !res.empty()) {
-      sel--;
-    } else if ((c == '\n' || c == '\r') && listMode && !res.empty()) {
+    }
+    closedir(dir);
+
+    int maxLen = 0;
+    for (const auto &p : all)
+      if (p.name.length() > maxLen)
+        maxLen = p.name.length();
+    int nw = maxLen + 2;
+    int pad = (w.ws_col - (nw + 14)) / 2;
+    if (pad < 0)
+      pad = 0;
+
+    enableRawMode();
+
+    std::string q;
+    int sel = 0;
+    int offset = 0;
+    int rows = 30;
+    bool listMode = false;
+
+    while (true) {
       clearScreen();
-      std::cout << Red << "\nKill " << res[sel].name << " (" << res[sel].pid
-                << ")? (y/N) " << Reset << std::flush;
-      char yn;
-      read(STDIN_FILENO, &yn, 1);
-      if (yn == 'y' || yn == 'Y') {
-        if (kill(res[sel].pid, SIGTERM) == 0) {
-          std::cout << Green << "Sent SIGTERM \u2713\n" << Reset;
-        } else {
-          std::cout << Red << "Failed \u2717\n" << Reset;
-        }
-      } else {
-        std::cout << Yellow << "Cancelled\n" << Reset;
-      }
-      std::cout << "Press any key..." << std::flush;
-      read(STDIN_FILENO, &c, 1);
-    } else if ((c == '\x7f' || c == '\x08') && !listMode && !q.empty()) {
-      q.pop_back();
-    } else if (!listMode && c >= 32 && c <= 126) {
-      q += c;
-    }
-  }
+      printHeader(pad);
 
-  disableRawMode();
-  clearScreen();
-  std::cout << Green << "Bye!" << Reset "\n";
+      auto res = filter(all, q);
+      if (!res.empty()) {
+        if (sel >= (int)res.size())
+          sel = res.size() - 1;
+        if (sel < 0)
+          sel = 0;
+      }
+
+      int maxOffset = (int)res.size() - rows;
+      if (maxOffset < 0)
+        maxOffset = 0;
+      if (offset > maxOffset)
+        offset = maxOffset;
+      if (offset < 0)
+        offset = 0;
+      if (sel < offset)
+        offset = sel;
+      if (sel >= offset + rows && rows > 0)
+        offset = sel - rows + 1;
+
+      if (listMode) {
+        std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
+                  << Yellow << q << Reset "\n\n";
+      } else {
+        std::cout << std::string(pad, ' ') << White << "Search" << Green << ": "
+                  << Reset << q << Cyan << "█" << Reset "\n\n";
+      }
+
+      std::cout << std::string(pad, ' ') << White << "Processes (" << Green
+                << res.size() << White << ")" << Reset "\n";
+      printList(res, listMode ? sel : -1, offset, rows, nw, pad);
+
+      if (listMode) {
+        std::cout << "\n"
+                  << std::string(pad, ' ') << Yellow
+                  << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  q quit"
+                  << Reset "\n";
+      } else {
+        std::cout << "\n"
+                  << std::string(pad, ' ') << Yellow
+                  << "Type to filter  |  Tab browse  |  q quit" << Reset "\n";
+      }
+      std::cout << std::flush;
+
+      char c;
+      read(STDIN_FILENO, &c, 1);
+
+      if (c == '\t') {
+        listMode = !listMode;
+        if (!listMode)
+          sel = 0;
+      } else if (c == 'q') {
+        break;
+      } else if (c == '\x1b') {
+        char seq[2];
+        if (read(STDIN_FILENO, &seq[0], 1) == 1 &&
+            read(STDIN_FILENO, &seq[1], 1) == 1) {
+          if (seq[0] == '[') {
+            if (seq[1] == 'A' && listMode && !res.empty())
+              sel--;
+            else if (seq[1] == 'B' && listMode && !res.empty())
+              sel++;
+          }
+        }
+      } else if (c == 'j' && listMode && !res.empty()) {
+        sel++;
+      } else if (c == 'k' && listMode && !res.empty()) {
+        sel--;
+      } else if ((c == '\n' || c == '\r') && listMode && !res.empty()) {
+        clearScreen();
+        std::cout << Red << "\nKill " << res[sel].name << " (" << res[sel].pid
+                  << ")? (y/N) " << Reset << std::flush;
+        char yn;
+        read(STDIN_FILENO, &yn, 1);
+        if (yn == 'y' || yn == 'Y') {
+          if (kill(res[sel].pid, SIGTERM) == 0) {
+            std::cout << Green << "Sent SIGTERM \u2713\n" << Reset;
+          } else {
+            std::cout << Red << "Failed \u2717\n" << Reset;
+          }
+        } else {
+          std::cout << Yellow << "Cancelled\n" << Reset;
+        }
+        std::cout << "Press any key..." << std::flush;
+        read(STDIN_FILENO, &c, 1);
+      } else if ((c == '\x7f' || c == '\x08') && !listMode && !q.empty()) {
+        q.pop_back();
+      } else if (!listMode && c >= 32 && c <= 126) {
+        q += c;
+      }
+    }
+
+    disableRawMode();
+    clearScreen();
+    std::cout << Green << "Bye!" << Reset "\n";
+  }
+  if (strcmp("--drun", argv[1]) == 0) {
+    printf("%sRunning the app launcher%s\n", Green, Reset);
+    // Logic Goes here
+    return 0;
+  }
   return 0;
 }
