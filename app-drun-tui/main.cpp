@@ -216,41 +216,54 @@ void launchApp(const std::string &exec) {
 
 void printHeaderProcess(int pad) {
   std::cout << Cyan << std::string(pad, ' ')
-            << "╔══════════════════════════════════════════════╗\n";
+            << "╭──────────────────────────────────────╮\n";
   std::cout << std::string(pad, ' ')
-            << "║             Process Killer v1.0              ║\n";
+            << "│" << White << "          Process Killer v1.0           " << Cyan << "│\n";
   std::cout << std::string(pad, ' ')
-            << "╚══════════════════════════════════════════════╝\n"
+            << "╰──────────────────────────────────────╯\n"
             << Reset;
   std::cout << "\n";
 }
 void printHeaderApp(int pad) {
   std::cout << Cyan << std::string(pad, ' ')
-            << "╔══════════════════════════════════════════════╗\n";
+            << "╭──────────────────────────────────────╮\n";
   std::cout << std::string(pad, ' ')
-            << "║               App Runner v1.0                ║\n";
+            << "│" << White << "            App Runner v1.0             " << Cyan << "│\n";
   std::cout << std::string(pad, ' ')
-            << "╚══════════════════════════════════════════════╝\n"
+            << "╰──────────────────────────────────────╯\n"
             << Reset;
   std::cout << "\n";
 }
 
 void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
-               int nw, int pad) {
+               int nameW, int pidW, int pad) {
   int end = offset + rows;
   if (end > (int)procs.size())
     end = procs.size();
 
+  // Column header
+  std::cout << std::string(pad, ' ') << White << "  NAME"
+            << std::string(nameW - 4, ' ') << "PID" << Reset "\n";
+  std::cout << std::string(pad, ' ') << Cyan << "  "
+            << std::string(nameW + pidW, '-') << Reset "\n";
+
   for (int i = offset; i < end; i++) {
+    std::string pidStr = std::to_string(procs[i].pid);
+    int nameLen = (int)procs[i].name.length();
+    if (nameLen > nameW) nameLen = nameW;
+
     if (i == sel) {
       std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset << Rev
-                << procs[i].name
-                << std::string(nw - procs[i].name.length(), ' ') << Green
-                << procs[i].pid << Reset "\n";
+                << " " << procs[i].name.substr(0, nameW)
+                << std::string(nameW - nameLen, ' ')
+                << std::string(pidW - (int)pidStr.length(), ' ') << Green
+                << pidStr << Reset "\n";
     } else {
-      std::cout << std::string(pad, ' ') << "  " << procs[i].name
-                << std::string(nw - procs[i].name.length(), ' ') << Green
-                << procs[i].pid << Reset "\n";
+      std::cout << std::string(pad, ' ') << "  " << " "
+                << procs[i].name.substr(0, nameW)
+                << std::string(nameW - nameLen, ' ')
+                << std::string(pidW - (int)pidStr.length(), ' ') << Green
+                << pidStr << Reset "\n";
     }
   }
 
@@ -262,31 +275,42 @@ void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
   }
 }
 
-int main(int argc, char **argv) {
+
+std::vector<Process> scanProcesses() {
   std::vector<Process> all;
+  DIR *dir = opendir("/proc/");
+  if (!dir) {
+    return all;
+  }
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != nullptr) {
+    if (isdigit(entry->d_name[0])) {
+      int pid = atoi(entry->d_name);
+      all.emplace_back(pid, getProcessName(pid));
+    }
+  }
+  closedir(dir);
+  return all;
+}
+
+int main(int argc, char **argv) {
+  auto all = scanProcesses();
   struct winsize w;
   ioctl(STDIN_FILENO, TIOCGWINSZ, &w);
 
   if (argc < 2) {
 
-    DIR *dir = opendir("/proc/");
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != nullptr) {
-      if (isdigit(entry->d_name[0])) {
-        int pid = atoi(entry->d_name);
-        all.emplace_back(pid, getProcessName(pid));
-      }
-    }
-    closedir(dir);
-
     int maxLen = 0;
-    for (const auto &p : all)
-      if (p.name.length() > maxLen)
-        maxLen = p.name.length();
-    int nw = maxLen + 2;
-    int pad = (w.ws_col - (nw + 14)) / 2;
-    if (pad < 0)
-      pad = 0;
+    int maxPid = 0;
+    for (const auto &p : all) {
+      if (p.name.length() > maxLen) maxLen = p.name.length();
+      if (p.pid > maxPid) maxPid = p.pid;
+    }
+    int nameW = maxLen < 18 ? 18 : (maxLen > 30 ? 30 : maxLen);
+    int pidW = std::to_string(maxPid).length() < 5 ? 5 : std::to_string(maxPid).length();
+    int contentW = nameW + pidW + 6;
+    int pad = (w.ws_col - contentW) / 2;
+    if (pad < 0) pad = 0;
 
     enableRawMode();
 
@@ -332,17 +356,17 @@ int main(int argc, char **argv) {
 
       std::cout << std::string(pad, ' ') << White << "Processes (" << Green
                 << res.size() << White << ")" << Reset "\n";
-      printList(res, listMode ? sel : -1, offset, rows, nw, pad);
+      printList(res, listMode ? sel : -1, offset, rows, nameW, pidW, pad);
 
       if (listMode) {
         std::cout << "\n"
                   << std::string(pad, ' ') << Yellow
-                  << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  q quit"
+                  << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  r refresh  |  q quit"
                   << Reset "\n";
       } else {
         std::cout << "\n"
                   << std::string(pad, ' ') << Yellow
-                  << "Type to filter  |  Tab browse  |  q quit" << Reset "\n";
+                  << "Type to filter  |  Tab browse  |  r refresh  |  q quit" << Reset "\n";
       }
       std::cout << std::flush;
 
@@ -505,9 +529,8 @@ int main(int argc, char **argv) {
         launchApp(res[sel].exec);
         clearScreen();
         return 0;
-      } else if (c == '\x7f' || c == '\x08') {
-        if (!q.empty())
-          q.pop_back();
+      } else if ((c == '\x7f' || c == '\x08') && !q.empty()) {
+        q.pop_back();
       } else if (c >= 32 && c <= 126) {
         q += c;
       }

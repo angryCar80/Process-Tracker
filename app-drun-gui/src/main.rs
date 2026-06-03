@@ -4,7 +4,6 @@ use freedesktop_desktop_entry::{desktop_entries, get_languages_from_env};
 use iced::event::{self, Event};
 use iced::keyboard::key::{Key, Named};
 use iced::widget::operation::{focus, snap_to, RelativeOffset};
-use iced::widget::text::success;
 use iced::widget::{column, mouse_area, scrollable, text, text_input};
 use iced::{keyboard, Size};
 use iced::{Element, Subscription};
