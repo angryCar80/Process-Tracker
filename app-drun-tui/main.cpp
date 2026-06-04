@@ -54,7 +54,11 @@ class Process {
 public:
   int pid;
   std::string name;
-  Process(int pid, const std::string &name) : pid(pid), name(name) {}
+  unsigned long rss_kb;
+  unsigned long cpu_total;
+  Process(int pid, const std::string &name, unsigned long rss = 0,
+          unsigned long cpu = 0)
+      : pid(pid), name(name), rss_kb(rss), cpu_total(cpu) {}
 };
 
 // To Get Process Name
@@ -217,8 +221,8 @@ void launchApp(const std::string &exec) {
 void printHeaderProcess(int pad) {
   std::cout << Cyan << std::string(pad, ' ')
             << "╭──────────────────────────────────────╮\n";
-  std::cout << std::string(pad, ' ')
-            << "│" << White << "          Process Killer v1.0           " << Cyan << "│\n";
+  std::cout << std::string(pad, ' ') << "│" << White
+            << "          Process Killer v1.0         " << Cyan << "│\n";
   std::cout << std::string(pad, ' ')
             << "╰──────────────────────────────────────╯\n"
             << Reset;
@@ -227,43 +231,74 @@ void printHeaderProcess(int pad) {
 void printHeaderApp(int pad) {
   std::cout << Cyan << std::string(pad, ' ')
             << "╭──────────────────────────────────────╮\n";
-  std::cout << std::string(pad, ' ')
-            << "│" << White << "            App Runner v1.0             " << Cyan << "│\n";
+  std::cout << std::string(pad, ' ') << "│" << White
+            << "            App Runner v1.0         " << Cyan << "│\n";
   std::cout << std::string(pad, ' ')
             << "╰──────────────────────────────────────╯\n"
             << Reset;
   std::cout << "\n";
 }
 
+std::string formatMem(unsigned long kb) {
+  if (kb >= 1048576)
+    return std::to_string(kb / 1048576) + "G";
+  if (kb >= 1024)
+    return std::to_string(kb / 1024) + "." + std::to_string((kb % 1024) / 103) +
+           "M";
+  return std::to_string(kb) + "K";
+}
+
+std::string formatCpu(unsigned long ticks) {
+  long secs = ticks / sysconf(_SC_CLK_TCK);
+  int h = secs / 3600;
+  int m = (secs % 3600) / 60;
+  int s = secs % 60;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%d:%02d:%02d", h, m, s);
+  return std::string(buf);
+}
+
 void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
-               int nameW, int pidW, int pad) {
+               int nameW, int pidW, int memW, int cpuW, int pad) {
   int end = offset + rows;
   if (end > (int)procs.size())
     end = procs.size();
 
   // Column header
   std::cout << std::string(pad, ' ') << White << "  NAME"
-            << std::string(nameW - 4, ' ') << "PID" << Reset "\n";
-  std::cout << std::string(pad, ' ') << Cyan << "  "
-            << std::string(nameW + pidW, '-') << Reset "\n";
+            << std::string(nameW - 4, ' ') << "PID"
+            << std::string(pidW - 2, ' ') << "MEM" << std::string(memW - 2, ' ')
+            << "CPU" << Reset "\n";
+  int sepLen = nameW + pidW + memW + cpuW + 3;
+  std::cout << std::string(pad, ' ') << Cyan << "  " << std::string(sepLen, '-')
+            << Reset "\n";
 
   for (int i = offset; i < end; i++) {
     std::string pidStr = std::to_string(procs[i].pid);
+    std::string memStr = formatMem(procs[i].rss_kb);
+    std::string cpuStr = formatCpu(procs[i].cpu_total);
     int nameLen = (int)procs[i].name.length();
-    if (nameLen > nameW) nameLen = nameW;
+    if (nameLen > nameW)
+      nameLen = nameW;
 
     if (i == sel) {
       std::cout << std::string(pad, ' ') << Rev << Cyan << "▸ " << Reset << Rev
                 << " " << procs[i].name.substr(0, nameW)
                 << std::string(nameW - nameLen, ' ')
-                << std::string(pidW - (int)pidStr.length(), ' ') << Green
-                << pidStr << Reset "\n";
+                << std::string(pidW - (int)pidStr.length(), ' ') << pidStr
+                << " " << std::string(memW - (int)memStr.length(), ' ')
+                << memStr << " "
+                << std::string(cpuW - (int)cpuStr.length(), ' ') << cpuStr
+                << Reset "\n";
     } else {
       std::cout << std::string(pad, ' ') << "  " << " "
                 << procs[i].name.substr(0, nameW)
                 << std::string(nameW - nameLen, ' ')
-                << std::string(pidW - (int)pidStr.length(), ' ') << Green
-                << pidStr << Reset "\n";
+                << std::string(pidW - (int)pidStr.length(), ' ') << pidStr
+                << " " << std::string(memW - (int)memStr.length(), ' ')
+                << memStr << " "
+                << std::string(cpuW - (int)cpuStr.length(), ' ') << cpuStr
+                << Reset "\n";
     }
   }
 
@@ -275,18 +310,60 @@ void printList(const std::vector<Process> &procs, int sel, int offset, int rows,
   }
 }
 
+unsigned long getRssKb(int pid) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/%d/status", pid);
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return 0;
+
+  char line[256];
+  unsigned long rss = 0;
+  while (fgets(line, sizeof(line), fp)) {
+    if (strncmp(line, "VmRSS:", 6) == 0) {
+      sscanf(line + 6, "%lu", &rss);
+      break;
+    }
+  }
+  fclose(fp);
+  return rss;
+}
+
+unsigned long getCpuTicks(int pid) {
+  char path[64];
+  snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+  FILE *fp = fopen(path, "r");
+  if (!fp)
+    return 0;
+
+  char line[512];
+  if (!fgets(line, sizeof(line), fp)) {
+    fclose(fp);
+    return 0;
+  }
+  char *p = strrchr(line, ')');
+  if (!p) {
+    return 0;
+  }
+  p += 2;
+  unsigned long utime = 0, stime = 0;
+
+  sscanf(p, "%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %lu %lu", &utime,
+         &stime);
+  return utime + stime;
+}
 
 std::vector<Process> scanProcesses() {
   std::vector<Process> all;
   DIR *dir = opendir("/proc/");
-  if (!dir) {
+  if (!dir)
     return all;
-  }
   struct dirent *entry;
   while ((entry = readdir(dir)) != nullptr) {
     if (isdigit(entry->d_name[0])) {
       int pid = atoi(entry->d_name);
-      all.emplace_back(pid, getProcessName(pid));
+      all.emplace_back(pid, getProcessName(pid), getRssKb(pid),
+                       getCpuTicks(pid));
     }
   }
   closedir(dir);
@@ -303,14 +380,21 @@ int main(int argc, char **argv) {
     int maxLen = 0;
     int maxPid = 0;
     for (const auto &p : all) {
-      if (p.name.length() > maxLen) maxLen = p.name.length();
-      if (p.pid > maxPid) maxPid = p.pid;
+      if (p.name.length() > maxLen)
+        maxLen = p.name.length();
+      if (p.pid > maxPid)
+        maxPid = p.pid;
     }
     int nameW = maxLen < 18 ? 18 : (maxLen > 30 ? 30 : maxLen);
-    int pidW = std::to_string(maxPid).length() < 5 ? 5 : std::to_string(maxPid).length();
-    int contentW = nameW + pidW + 6;
+    int pidW = std::to_string(maxPid).length() < 5
+                   ? 5
+                   : std::to_string(maxPid).length();
+    int memW = 8;
+    int cpuW = 10;
+    int contentW = nameW + pidW + memW + cpuW + 9;
     int pad = (w.ws_col - contentW) / 2;
-    if (pad < 0) pad = 0;
+    if (pad < 0)
+      pad = 0;
 
     enableRawMode();
 
@@ -356,17 +440,20 @@ int main(int argc, char **argv) {
 
       std::cout << std::string(pad, ' ') << White << "Processes (" << Green
                 << res.size() << White << ")" << Reset "\n";
-      printList(res, listMode ? sel : -1, offset, rows, nameW, pidW, pad);
+      printList(res, listMode ? sel : -1, offset, rows, nameW, pidW, memW, cpuW,
+                pad);
 
       if (listMode) {
         std::cout << "\n"
                   << std::string(pad, ' ') << Yellow
-                  << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  r refresh  |  q quit"
+                  << "j/k/↑↓ scroll  |  Enter kill  |  Tab search  |  r "
+                     "refresh  |  q quit"
                   << Reset "\n";
       } else {
         std::cout << "\n"
                   << std::string(pad, ' ') << Yellow
-                  << "Type to filter  |  Tab browse  |  r refresh  |  q quit" << Reset "\n";
+                  << "Type to filter  |  Tab browse  |  r refresh  |  q quit"
+                  << Reset "\n";
       }
       std::cout << std::flush;
 
